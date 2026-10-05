@@ -27,10 +27,12 @@ const (
 	btnStart  = "▶️ Начать измерение"
 	btnFinish = "⏹ Закончить измерения"
 	btnChart  = "📈 График"
+	btnList   = "📋 Список"
 
 	cbDropReading = "drop:"  // удалить замер из текущей серии
 	cbDeleteSaved = "del:"   // удалить сохранённое измерение из базы
 	cbChart       = "chart:" // показать график за N дней
+	cbList        = "list:"  // показать список измерений за N дней
 )
 
 var chartPeriods = []int{7, 30, 90, 365}
@@ -135,7 +137,9 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 	case text == btnFinish || text == "/end":
 		b.finishSession(chatID, false)
 	case text == btnChart || text == "/chart":
-		b.askChartPeriod(chatID)
+		b.askPeriod(chatID, cbChart)
+	case text == btnList || text == "/list":
+		b.askPeriod(chatID, cbList)
 	case text == btnPills || text == "/pill":
 		b.handlePillsButton(chatID, m.From.ID)
 	case text == "/pills" || strings.HasPrefix(text, "/pills "):
@@ -157,6 +161,7 @@ const helpText = `Бот записывает давление по фото э�
 Как считается итог серии: при 1–2 замерах — среднее; при 3 и больше первый замер отбрасывается (он обычно завышен), остальные усредняются.
 
 «График» — давление за период: красное — верхнее, синее — нижнее, пунктир — тренд (взвешенное среднее), жёлтым — дни, когда таблетки не отмечены.
+«Список» — те же измерения текстом, по дням.
 
 Таблетки: утром бот напоминает и повторяет, пока не нажмёте «✅ Выпил». Можно отметить заранее кнопкой «💊 Выпил таблетки». Расписание и пропуски — /pills.`
 
@@ -391,6 +396,12 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 		b.request(tgbotapi.NewCallback(q.ID, "Рисую…"))
 		b.sendChart(chatID, q.From.ID, days)
 		return
+
+	case strings.HasPrefix(q.Data, cbList):
+		days, _ := strconv.Atoi(strings.TrimPrefix(q.Data, cbList))
+		b.request(tgbotapi.NewCallback(q.ID, ""))
+		b.sendList(chatID, q.From.ID, days)
+		return
 	}
 
 	b.request(tgbotapi.NewCallback(q.ID, answer))
@@ -412,10 +423,11 @@ func (b *Bot) dropReading(chatID, id int64) bool {
 	return false
 }
 
-func (b *Bot) askChartPeriod(chatID int64) {
+// askPeriod предлагает выбрать период; prefix — для графика или для списка.
+func (b *Bot) askPeriod(chatID int64, prefix string) {
 	row := make([]tgbotapi.InlineKeyboardButton, 0, len(chartPeriods))
 	for _, d := range chartPeriods {
-		row = append(row, tgbotapi.NewInlineKeyboardButtonData(periodName(d), cbChart+strconv.Itoa(d)))
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(periodName(d), prefix+strconv.Itoa(d)))
 	}
 	msg := tgbotapi.NewMessage(chatID, "За какой период?")
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(row)
@@ -436,14 +448,20 @@ func periodName(days int) string {
 	return fmt.Sprintf("%d дн.", days)
 }
 
+// periodRange — последние days суток по местному времени, включая сегодня: [from, to).
+func (b *Bot) periodRange(days int) (from, to time.Time) {
+	loc := b.cfg.Location
+	now := b.now().In(loc)
+	to = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, 1)
+	return to.AddDate(0, 0, -days), to
+}
+
 func (b *Bot) sendChart(chatID, userID int64, days int) {
 	if days <= 0 || days > 3660 {
 		days = 30
 	}
 	loc := b.cfg.Location
-	now := b.now().In(loc)
-	to := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, 1)
-	from := to.AddDate(0, 0, -days)
+	from, to := b.periodRange(days)
 
 	// Тренд считаем по истории с запасом, чтобы в начале периода он не начинался с нуля.
 	history := from.Add(-4 * b.cfg.TrendHalfLife)
@@ -514,7 +532,8 @@ func summary(ms []pressure.Measurement) string {
 func withKeyboard(msg tgbotapi.MessageConfig) tgbotapi.MessageConfig {
 	kb := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnStart), tgbotapi.NewKeyboardButton(btnFinish)),
-		tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnChart), tgbotapi.NewKeyboardButton(btnPills)),
+		tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnChart), tgbotapi.NewKeyboardButton(btnList)),
+		tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnPills)),
 	)
 	kb.ResizeKeyboard = true
 	msg.ReplyMarkup = kb
