@@ -1,0 +1,14 @@
+# Боевой compose для домашнего сервера: кладётся в ~/bots/presurebot/ рядом с .env.
+# Образ presurebot собирается из репозитория: ~/bots/update-bot.sh presurebot
+services:
+  presurebot:
+    image: presurebot
+    container_name: presurebot
+    env_file: .env
+    restart: unless-stopped
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
