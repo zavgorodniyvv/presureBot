@@ -9,6 +9,8 @@ presureBot — Telegram-бот для учёта артериального да
 - `cmd/bot/` — точка входа, чтение env, цикл обновлений (каждое обновление в своей горутине)
 - `internal/bot/` — обработчики Telegram; серии замеров хранятся в памяти (теряются при рестарте), автосохранение по `SESSION_TIMEOUT`
 - `internal/pressure/` — `Reading`/`Measurement`, проверка диапазонов, `Average` (1–2 замера — среднее, ≥3 — первый отбрасывается), `Trend` (экспоненциально взвешенное по времени среднее, `TREND_HALF_LIFE`)
+- `internal/pills/` — расписание таблеток по дням недели (`ParseSchedule`, «вс,вт,чт 04:30; пн,ср 06:30»), окно напоминаний на день
+- `internal/bot/pills.go` — напоминания: тик каждые 30 с, повтор каждые `PILL_REPEAT` до `PILL_CUTOFF`, потом одно финальное; состояние дня в Mongo `pill_days` (переживает рестарт); `/pills` — расписание и пропуски
 - `internal/recognize/` — клиент OpenAI Chat Completions (без SDK)
 - `internal/storage/` — mongo-driver v2, индекс `(user_id, measured_at)` создаётся при старте
 - `internal/chart/` — gonum/plot: красное верхнее, синее нижнее, пунктир — тренд, серые вертикали — границы суток (на периодах > 92 дней — границы месяцев)
@@ -34,7 +36,7 @@ TEST_MONGODB_URI='mongodb://localhost:57017' go test ./internal/storage
 ## Переменные окружения
 
 Обязательные: `TELEGRAM_TOKEN`, `MONGODB_URI`, `OPENAI_API_KEY`. `ALLOWED_USER_IDS` (через запятую) — пока пуст, бот только сообщает отправителю его ID.
-Необязательные: `MONGODB_DATABASE` (pressurebot), `OPENAI_MODEL` (gpt-4.1), `TZ` (Asia/Jerusalem), `TREND_HALF_LIFE` (72h), `SESSION_TIMEOUT` (20m).
+Необязательные: `PILL_SCHEDULE` (пусто — без напоминаний), `PILL_CUTOFF` (12:00), `PILL_REPEAT` (10m), `MONGODB_DATABASE` (pressurebot), `OPENAI_MODEL` (gpt-4.1), `TZ` (Asia/Jerusalem), `TREND_HALF_LIFE` (72h), `SESSION_TIMEOUT` (20m).
 
 ## Соглашения
 

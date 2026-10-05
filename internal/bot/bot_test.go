@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/zavgorodniyvv/presureBot/internal/pills"
 	"github.com/zavgorodniyvv/presureBot/internal/pressure"
 	"github.com/zavgorodniyvv/presureBot/internal/recognize"
 )
@@ -21,18 +23,26 @@ const (
 )
 
 type fakeAPI struct {
-	mu   sync.Mutex
-	sent []tgbotapi.Chattable
+	mu      sync.Mutex
+	sent    []tgbotapi.Chattable
+	deleted []int
+	msgID   int
 }
 
 func (f *fakeAPI) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, c)
-	return tgbotapi.Message{}, nil
+	f.msgID++
+	return tgbotapi.Message{MessageID: 1000 + f.msgID}, nil
 }
 
 func (f *fakeAPI) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if d, ok := c.(tgbotapi.DeleteMessageConfig); ok {
+		f.deleted = append(f.deleted, d.MessageID)
+	}
 	return &tgbotapi.APIResponse{Ok: true}, nil
 }
 
@@ -81,10 +91,86 @@ func atoi(s string) int {
 }
 
 type fakeStore struct {
-	mu    sync.Mutex
-	saved []pressure.Measurement
-	seq   int
-	fail  bool
+	mu        sync.Mutex
+	saved     []pressure.Measurement
+	seq       int
+	fail      bool
+	pillDays  map[string]pills.Day // ключ — дата; тесты работают с одним пользователем
+	schedules map[int64]string
+}
+
+func (s *fakeStore) PillDay(_ context.Context, _ int64, date string) (pills.Day, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.pillDays[date]
+	if !ok {
+		d.Date = date
+	}
+	return d, nil
+}
+
+func (s *fakeStore) update(date string, f func(*pills.Day)) {
+	if s.pillDays == nil {
+		s.pillDays = map[string]pills.Day{}
+	}
+	d := s.pillDays[date]
+	d.Date = date
+	f(&d)
+	s.pillDays[date] = d
+}
+
+func (s *fakeStore) MarkPillTaken(_ context.Context, _ int64, date string, at time.Time) (pills.Day, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	first := !s.pillDays[date].Taken()
+	if first {
+		s.update(date, func(d *pills.Day) { d.TakenAt = at })
+	}
+	return s.pillDays[date], first, nil
+}
+
+func (s *fakeStore) SaveReminder(_ context.Context, _ int64, date string, at time.Time, msgID int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.update(date, func(d *pills.Day) { d.LastReminderAt, d.LastReminderMsgID = at, msgID })
+	return nil
+}
+
+func (s *fakeStore) SetFinalSent(_ context.Context, _ int64, date string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.update(date, func(d *pills.Day) { d.FinalSent = true })
+	return nil
+}
+
+func (s *fakeStore) PillDays(_ context.Context, _ int64, from, to string) ([]pills.Day, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []pills.Day
+	for date, d := range s.pillDays {
+		if date >= from && date <= to {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })
+	return out, nil
+}
+
+func (s *fakeStore) PillSchedule(_ context.Context, uid int64) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.schedules[uid]
+	return v, ok, nil
+}
+
+func (s *fakeStore) SetPillSchedule(_ context.Context, uid int64, v string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.schedules == nil {
+		s.schedules = map[int64]string{}
+	}
+	s.schedules[uid] = v
+	return nil
 }
 
 func (s *fakeStore) Save(_ context.Context, m pressure.Measurement) (string, error) {
@@ -134,6 +220,8 @@ func newTestBot(timeout time.Duration) (*Bot, *fakeAPI, *fakeStore) {
 		Location:       loc,
 		TrendHalfLife:  3 * 24 * time.Hour,
 		SessionTimeout: timeout,
+		PillCutoff:     12 * time.Hour,
+		PillRepeat:     10 * time.Minute,
 	})
 	// «Скачанная картинка» — это просто URL, по нему фейковый распознаватель отдаёт значения.
 	b.download = func(_ context.Context, url string) ([]byte, error) { return []byte(url), nil }

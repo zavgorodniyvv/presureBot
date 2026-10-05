@@ -31,7 +31,8 @@ func TestRender(t *testing.T) {
 	}
 	trend := pressure.Trend(ms, 3*24*time.Hour)
 
-	img, err := Render(ms, trend, Options{From: from, To: to, Location: loc, Title: "Давление за 10 дней"})
+	missed := []time.Time{from.AddDate(0, 0, 2), from.AddDate(0, 0, 7)}
+	img, err := Render(ms, trend, Options{From: from, To: to, Location: loc, Title: "Давление за 10 дней", MissedPills: missed})
 	if err != nil {
 		t.Fatal(err)
 	}

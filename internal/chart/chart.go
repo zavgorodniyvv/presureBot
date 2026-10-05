@@ -26,6 +26,7 @@ var (
 	redTrend  = color.NRGBA{R: 0xd6, G: 0x27, B: 0x28, A: 0x99}
 	blueTrend = color.NRGBA{R: 0x1f, G: 0x5f, B: 0xd0, A: 0x99}
 	dayLine   = color.Gray{Y: 0xb0}
+	missedDay = color.NRGBA{R: 0xff, G: 0xc1, B: 0x07, A: 0x38} // бледно-янтарный: не спорит с красной линией
 	gridLine  = color.Gray{Y: 0xe6}
 )
 
@@ -34,6 +35,8 @@ type Options struct {
 	From, To time.Time      // показываемый период [From, To); границы — полночь
 	Location *time.Location // часовой пояс для дней и подписей
 	Title    string
+	// MissedPills — начала суток, когда таблетки не отмечены; закрашиваются фоном.
+	MissedPills []time.Time
 }
 
 // Render рисует график.
@@ -84,6 +87,21 @@ func Render(measurements []pressure.Measurement, trend []pressure.TrendPoint, op
 	yMax = math.Ceil((yMax+5)/10) * 10
 	p.Y.Min, p.Y.Max = yMin, yMax
 	p.X.Min, p.X.Max = float64(opt.From.Unix()), float64(opt.To.Unix())
+
+	// Дни без таблеток — фоновые полосы под всеми линиями.
+	for i, d := range opt.MissedPills {
+		x0, x1 := float64(d.Unix()), float64(d.AddDate(0, 0, 1).Unix())
+		poly, err := plotter.NewPolygon(plotter.XYs{{X: x0, Y: yMin}, {X: x1, Y: yMin}, {X: x1, Y: yMax}, {X: x0, Y: yMax}})
+		if err != nil {
+			return nil, err
+		}
+		poly.Color = missedDay
+		poly.LineStyle.Width = 0
+		p.Add(poly)
+		if i == 0 {
+			p.Legend.Add("пропуск таблеток", poly)
+		}
+	}
 
 	grid := plotter.NewGrid()
 	grid.Vertical.Color = nil

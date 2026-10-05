@@ -17,6 +17,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/zavgorodniyvv/presureBot/internal/chart"
+	"github.com/zavgorodniyvv/presureBot/internal/pills"
 	"github.com/zavgorodniyvv/presureBot/internal/pressure"
 	"github.com/zavgorodniyvv/presureBot/internal/recognize"
 	"github.com/zavgorodniyvv/presureBot/internal/storage"
@@ -50,6 +51,10 @@ type Config struct {
 	Location       *time.Location
 	TrendHalfLife  time.Duration // период полураспада веса в линии тренда
 	SessionTimeout time.Duration // через сколько бездействия серия сохраняется сама
+
+	PillSchedule pills.Schedule // расписание по умолчанию, если пользователь не задал своё
+	PillCutoff   time.Duration  // до какого времени дня повторять напоминание
+	PillRepeat   time.Duration  // интервал повторов
 }
 
 type entry struct {
@@ -76,6 +81,8 @@ type Bot struct {
 	mu       sync.Mutex
 	sessions map[int64]*session // ключ — chat ID
 	nextID   int64
+
+	pillMu sync.Mutex // упорядочивает напоминания и отметки о таблетках
 }
 
 func New(api API, rec recognize.Recognizer, st storage.Storage, cfg Config) *Bot {
@@ -129,6 +136,10 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 		b.finishSession(chatID, false)
 	case text == btnChart || text == "/chart":
 		b.askChartPeriod(chatID)
+	case text == btnPills || text == "/pill":
+		b.handlePillsButton(chatID, m.From.ID)
+	case text == "/pills" || strings.HasPrefix(text, "/pills "):
+		b.handlePillsCommand(chatID, m.From.ID, strings.TrimPrefix(text, "/pills"))
 	case manualRe.MatchString(text):
 		b.handleManual(m, text)
 	default:
@@ -145,7 +156,9 @@ const helpText = `Бот записывает давление по фото э�
 
 Как считается итог серии: при 1–2 замерах — среднее; при 3 и больше первый замер отбрасывается (он обычно завышен), остальные усредняются.
 
-«График» — давление за период: красное — верхнее, синее — нижнее, пунктир — тренд (взвешенное среднее).`
+«График» — давление за период: красное — верхнее, синее — нижнее, пунктир — тренд (взвешенное среднее), жёлтым — дни, когда таблетки не отмечены.
+
+Таблетки: утром бот напоминает и повторяет, пока не нажмёте «✅ Выпил». Можно отметить заранее кнопкой «💊 Выпил таблетки». Расписание и пропуски — /pills.`
 
 // imageOf возвращает file ID картинки: сжатого фото или изображения, отправленного файлом.
 func imageOf(m *tgbotapi.Message) (fileID, mime string) {
@@ -320,10 +333,19 @@ func (b *Bot) finishSession(chatID int64, auto bool) {
 		sb.WriteString("Один замер.")
 	}
 
-	msg := tgbotapi.NewMessage(chatID, sb.String())
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🗑 Удалить запись", cbDeleteSaved+id),
-	))
+	)}
+	// Утренний замер — хороший момент вспомнить о таблетках.
+	if date, ok := b.pillPrompt(ctx, s.userID); ok {
+		sb.WriteString("\n\n" + pillQuestion)
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("✅ Выпил", cbPillAfter+date),
+		))
+	}
+
+	msg := tgbotapi.NewMessage(chatID, sb.String())
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
 	b.send(msg)
 }
 
@@ -359,6 +381,10 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 		default:
 			answer = "Запись уже удалена"
 		}
+
+	case strings.HasPrefix(q.Data, cbPill), strings.HasPrefix(q.Data, cbPillAfter):
+		b.handlePillCallback(q)
+		return
 
 	case strings.HasPrefix(q.Data, cbChart):
 		days, _ := strconv.Atoi(strings.TrimPrefix(q.Data, cbChart))
@@ -440,8 +466,13 @@ func (b *Bot) sendChart(chatID, userID int64, days int) {
 		}
 	}
 
+	missed, _, err := b.missedBetween(ctx, userID, from.Format(pills.DateLayout), to.AddDate(0, 0, -1).Format(pills.DateLayout))
+	if err != nil {
+		log.Printf("пропуски таблеток для графика: %v", err) // график нарисуем и без них
+	}
+
 	title := fmt.Sprintf("Давление: %s — %s", from.Format("02.01.2006"), to.AddDate(0, 0, -1).Format("02.01.2006"))
-	img, err := chart.Render(ms, trend, chart.Options{From: from, To: to, Location: loc, Title: title})
+	img, err := chart.Render(ms, trend, chart.Options{From: from, To: to, Location: loc, Title: title, MissedPills: missed})
 	if errors.Is(err, chart.ErrNoData) {
 		b.reply(chatID, fmt.Sprintf("За период «%s» измерений нет.", strings.ToLower(periodName(days))))
 		return
@@ -483,7 +514,7 @@ func summary(ms []pressure.Measurement) string {
 func withKeyboard(msg tgbotapi.MessageConfig) tgbotapi.MessageConfig {
 	kb := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnStart), tgbotapi.NewKeyboardButton(btnFinish)),
-		tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnChart)),
+		tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnChart), tgbotapi.NewKeyboardButton(btnPills)),
 	)
 	kb.ResizeKeyboard = true
 	msg.ReplyMarkup = kb

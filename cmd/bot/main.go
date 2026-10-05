@@ -15,6 +15,7 @@ import (
 
 	"github.com/zavgorodniyvv/presureBot/internal/bot"
 	"github.com/zavgorodniyvv/presureBot/internal/logging"
+	"github.com/zavgorodniyvv/presureBot/internal/pills"
 	"github.com/zavgorodniyvv/presureBot/internal/recognize"
 	"github.com/zavgorodniyvv/presureBot/internal/storage"
 )
@@ -57,6 +58,19 @@ func main() {
 		log.Fatalf("SESSION_TIMEOUT: %v", err)
 	}
 
+	pillSchedule, err := pills.ParseSchedule(os.Getenv("PILL_SCHEDULE"))
+	if err != nil {
+		log.Fatalf("PILL_SCHEDULE: %v", err)
+	}
+	pillCutoff, err := pills.ParseClock(env("PILL_CUTOFF", "12:00"))
+	if err != nil {
+		log.Fatalf("PILL_CUTOFF: %v", err)
+	}
+	pillRepeat, err := time.ParseDuration(env("PILL_REPEAT", "10m"))
+	if err != nil || pillRepeat < time.Minute {
+		log.Fatalf("PILL_REPEAT: нужна длительность от 1m, например 10m (%v)", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -77,7 +91,11 @@ func main() {
 		Location:       loc,
 		TrendHalfLife:  halfLife,
 		SessionTimeout: sessionTimeout,
+		PillSchedule:   pillSchedule,
+		PillCutoff:     pillCutoff,
+		PillRepeat:     pillRepeat,
 	})
+	go b.RunReminders(ctx)
 
 	upd := tgbotapi.NewUpdate(0)
 	upd.Timeout = 60
