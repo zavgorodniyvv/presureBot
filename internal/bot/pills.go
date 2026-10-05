@@ -85,7 +85,9 @@ func (b *Bot) remindUser(ctx context.Context, userID int64, now time.Time) error
 	}
 
 	if !now.Before(w.Cutoff) {
-		if day.FinalSent {
+		// Финальное предупреждение — только если сегодня уже напоминали: после
+		// простоя бота или в день включения функции оно было бы неожиданным.
+		if day.FinalSent || day.LastReminderAt.IsZero() {
 			return nil
 		}
 		msg := tgbotapi.NewMessage(chatID, "❗ Таблетки сегодня не отмечены. Если всё-таки выпили — нажмите кнопку.")
@@ -282,8 +284,8 @@ func clock(d time.Duration) string {
 }
 
 // missedDays — пропущенные дни (начала суток) за последние days дней и число отмеченных.
-// Учитываются только дни, когда бот напоминал или была отметка, — дни до
-// появления функции и дни простоя бота пропусками не считаются.
+// Пропуском считается только день, когда бот напоминал, а отметки нет, —
+// дни до появления функции и дни простоя бота не учитываются.
 func (b *Bot) missedDays(ctx context.Context, userID int64, days int) ([]time.Time, int, error) {
 	loc := b.cfg.Location
 	now := b.now().In(loc)
@@ -313,6 +315,8 @@ func (b *Bot) missedBetween(ctx context.Context, userID int64, from, to string) 
 		case d.Taken():
 			taken++
 			continue
+		case d.LastReminderAt.IsZero():
+			continue // не напоминали (бот не работал) — не пропуск
 		case d.Date > today:
 			continue
 		case d.Date == today && (!todayOK || !todayWindow.Missed(d, now)):

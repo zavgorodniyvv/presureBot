@@ -128,6 +128,23 @@ func TestPillReminderFlow(t *testing.T) {
 	}
 }
 
+func TestNoFinalWarningWithoutReminders(t *testing.T) {
+	b, api, st, now := pillBot(t)
+	loc := b.cfg.Location
+
+	// Бот запущен вечером, утром он не работал: ни предупреждения, ни пропуска.
+	*now = at(loc, 5, 19, 57)
+	b.pillTick(context.Background())
+	if api.count() != 0 {
+		t.Fatalf("неожиданное сообщение: %q", api.lastText(t))
+	}
+	st.update("2026-10-04", func(d *pills.Day) { d.FinalSent = true }) // след старой версии
+	missed, _, _ := b.missedDays(context.Background(), userID, 30)
+	if len(missed) != 0 {
+		t.Errorf("пропуски без напоминаний: %v", missed)
+	}
+}
+
 func TestPillsButtonBeforeReminder(t *testing.T) {
 	b, api, st, now := pillBot(t)
 	loc := b.cfg.Location
