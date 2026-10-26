@@ -17,11 +17,7 @@ const testSchedule = "вс,вт,чт 04:30; пн,ср 06:30; пт,сб 07:00"
 func pillBot(t *testing.T) (*Bot, *fakeAPI, *fakeStore, *time.Time) {
 	t.Helper()
 	b, api, st := newTestBot(0)
-	sch, err := pills.ParseSchedule(testSchedule)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b.cfg.PillSchedule = sch
+	st.SetPillSchedule(context.Background(), userID, testSchedule)
 	now := new(time.Time)
 	b.now = func() time.Time { return *now }
 	return b, api, st, now
@@ -235,5 +231,68 @@ func TestPillsCommandSetsSchedule(t *testing.T) {
 	b.Handle(text("/pills -", 0))
 	if !strings.Contains(api.lastText(t), "выключены") {
 		t.Errorf("выключение: %q", api.lastText(t))
+	}
+}
+
+func TestNoPillsWithoutSchedule(t *testing.T) {
+	b, api, st := newTestBot(0)
+	loc := b.cfg.Location
+	sch, _ := pills.ParseSchedule(testSchedule)
+	b.cfg.PillSchedule = sch // общее расписание новым пользователям не достаётся
+	now := at(loc, 6, 4, 30)
+	b.now = func() time.Time { return now }
+
+	b.pillTick(context.Background())
+	if api.count() != 0 {
+		t.Fatal("напомнили без расписания")
+	}
+	b.Handle(photo("130/85/70", 0))
+	b.Handle(text(btnFinish, 1))
+	if strings.Contains(api.lastText(t), pillQuestion) {
+		t.Error("спросили о таблетках без расписания")
+	}
+	if len(st.pillDays) != 0 {
+		t.Fatalf("записали день: %+v", st.pillDays)
+	}
+}
+
+func TestSeedPillSchedules(t *testing.T) {
+	ctx := context.Background()
+	sch, _ := pills.ParseSchedule(testSchedule)
+
+	// Новый пользователь: выключено, и после нажатия «Выпил» и рестарта — тоже.
+	b, _, st := newTestBot(0)
+	b.cfg.PillSchedule = sch
+	if err := b.SeedPillSchedules(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := st.schedules[userID]; !ok || v != "" {
+		t.Fatalf("новому пользователю: %q ok=%v", v, ok)
+	}
+	b.Handle(text(btnPills, 0))
+	if err := b.SeedPillSchedules(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v := st.schedules[userID]; v != "" {
+		t.Fatalf("после отметки и рестарта: %q", v)
+	}
+
+	// Пользователь, которому уже напоминали: переносится общее расписание.
+	b, _, st = newTestBot(0)
+	b.cfg.PillSchedule = sch
+	st.SaveReminder(ctx, userID, "2026-10-06", base, 1)
+	if err := b.SeedPillSchedules(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v := st.schedules[userID]; v != sch.String() {
+		t.Fatalf("существующему пользователю: %q", v)
+	}
+	// Повторный запуск не трогает заданное пользователем.
+	st.SetPillSchedule(ctx, userID, "пн 08:00")
+	if err := b.SeedPillSchedules(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v := st.schedules[userID]; v != "пн 08:00" {
+		t.Fatalf("перезаписали расписание: %q", v)
 	}
 }

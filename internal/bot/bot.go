@@ -16,6 +16,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/zavgorodniyvv/presureBot/internal/access"
 	"github.com/zavgorodniyvv/presureBot/internal/chart"
 	"github.com/zavgorodniyvv/presureBot/internal/pills"
 	"github.com/zavgorodniyvv/presureBot/internal/pressure"
@@ -49,12 +50,12 @@ type API interface {
 
 // Config — настройки поведения бота.
 type Config struct {
-	AllowedUsers   map[int64]bool
+	Access         *access.List // кому можно пользоваться ботом и кто администратор
 	Location       *time.Location
 	TrendHalfLife  time.Duration // период полураспада веса в линии тренда
 	SessionTimeout time.Duration // через сколько бездействия серия сохраняется сама
 
-	PillSchedule pills.Schedule // расписание по умолчанию, если пользователь не задал своё
+	PillSchedule pills.Schedule // переносится при старте тем, кому уже напоминали (см. SeedPillSchedules)
 	PillCutoff   time.Duration  // до какого времени дня повторять напоминание
 	PillRepeat   time.Duration  // интервал повторов
 }
@@ -84,6 +85,9 @@ type Bot struct {
 	sessions map[int64]*session // ключ — chat ID
 	nextID   int64
 
+	requests     map[int64]accessRequest // незнакомцы, о которых уже сообщили администратору
+	awaitingUser bool                    // администратор нажал /newuser и вводит ID
+
 	pillMu sync.Mutex // упорядочивает напоминания и отметки о таблетках
 }
 
@@ -96,6 +100,7 @@ func New(api API, rec recognize.Recognizer, st storage.Storage, cfg Config) *Bot
 		download:   httpDownload,
 		now:        time.Now,
 		sessions:   make(map[int64]*session),
+		requests:   make(map[int64]accessRequest),
 	}
 }
 
@@ -108,20 +113,33 @@ func (b *Bot) Handle(u tgbotapi.Update) {
 		}
 	case u.Message != nil:
 		if b.allowed(u.Message.From) {
+			b.rememberName(u.Message.From)
 			b.handleMessage(u.Message)
 		} else if u.Message.From != nil {
-			log.Printf("доступ запрещён: user %d (@%s)", u.Message.From.ID, u.Message.From.UserName)
-			b.reply(u.Message.Chat.ID, fmt.Sprintf("Это личный бот. Ваш Telegram ID: %d", u.Message.From.ID))
+			b.handleStranger(u.Message)
 		}
 	}
 }
 
 func (b *Bot) allowed(u *tgbotapi.User) bool {
-	return u != nil && b.cfg.AllowedUsers[u.ID]
+	return u != nil && b.cfg.Access.Allowed(u.ID)
+}
+
+// rememberName запоминает имя пользователя, добавленного по одному ID.
+func (b *Bot) rememberName(u *tgbotapi.User) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := b.cfg.Access.RememberName(ctx, u.ID, displayName(u)); err != nil {
+		log.Printf("имя пользователя %d: %v", u.ID, err)
+	}
 }
 
 func (b *Bot) handleMessage(m *tgbotapi.Message) {
 	chatID := m.Chat.ID
+
+	if b.cfg.Access.IsAdmin(m.From.ID) && b.handleAdmin(m) {
+		return
+	}
 
 	if img, mime := imageOf(m); img != "" {
 		b.handlePhoto(m, img, mime)
@@ -131,7 +149,7 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 	text := strings.TrimSpace(m.Text)
 	switch {
 	case text == "/start" || text == "/help":
-		b.send(withKeyboard(tgbotapi.NewMessage(chatID, helpText)))
+		b.send(b.withKeyboard(tgbotapi.NewMessage(chatID, helpText)))
 	case text == btnStart || text == "/begin":
 		b.startSession(chatID, m.From.ID)
 	case text == btnFinish || text == "/end":
@@ -147,7 +165,7 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 	case manualRe.MatchString(text):
 		b.handleManual(m, text)
 	default:
-		b.send(withKeyboard(tgbotapi.NewMessage(chatID,
+		b.send(b.withKeyboard(tgbotapi.NewMessage(chatID,
 			"Не понял. Пришлите фото экрана тонометра, введите давление вручную (например 132/84 71) или воспользуйтесь кнопками.")))
 	}
 }
@@ -163,7 +181,7 @@ const helpText = `Бот записывает давление по фото э�
 «График» — давление за период: красное — верхнее, синее — нижнее, пунктир — тренд (взвешенное среднее), жёлтым — дни, когда таблетки не отмечены.
 «Список» — те же измерения текстом, по дням.
 
-Таблетки: утром бот напоминает и повторяет, пока не нажмёте «✅ Выпил». Можно отметить заранее кнопкой «💊 Выпил таблетки». Расписание и пропуски — /pills.`
+Таблетки: утром бот напоминает и повторяет, пока не нажмёте «✅ Выпил». Можно отметить заранее кнопкой «💊 Выпил таблетки». Напоминания включаются расписанием: /pills вс,вт,чт 04:30; пн,ср 06:30. Расписание и пропуски — /pills.`
 
 // imageOf возвращает file ID картинки: сжатого фото или изображения, отправленного файлом.
 func imageOf(m *tgbotapi.Message) (fileID, mime string) {
@@ -286,7 +304,7 @@ func (b *Bot) finishSession(chatID int64, auto bool) {
 		delete(b.sessions, chatID)
 		b.mu.Unlock()
 		if !auto {
-			b.send(withKeyboard(tgbotapi.NewMessage(chatID, "Нет замеров для сохранения. Нажмите «Начать измерение» и пришлите фото.")))
+			b.send(b.withKeyboard(tgbotapi.NewMessage(chatID, "Нет замеров для сохранения. Нажмите «Начать измерение» и пришлите фото.")))
 		}
 		return
 	}
@@ -389,6 +407,10 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 
 	case strings.HasPrefix(q.Data, cbPill), strings.HasPrefix(q.Data, cbPillAfter):
 		b.handlePillCallback(q)
+		return
+
+	case strings.HasPrefix(q.Data, cbAllow), strings.HasPrefix(q.Data, cbDeny), strings.HasPrefix(q.Data, cbDelUser):
+		b.handleAdminCallback(q)
 		return
 
 	case strings.HasPrefix(q.Data, cbChart):
@@ -529,11 +551,16 @@ func summary(ms []pressure.Measurement) string {
 	return s
 }
 
-func withKeyboard(msg tgbotapi.MessageConfig) tgbotapi.MessageConfig {
+// withKeyboard добавляет клавиатуру; в чате администратора — с кнопкой «Новый пользователь».
+func (b *Bot) withKeyboard(msg tgbotapi.MessageConfig) tgbotapi.MessageConfig {
+	last := tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnPills))
+	if b.cfg.Access.IsAdmin(msg.ChatID) {
+		last = append(last, tgbotapi.NewKeyboardButton(btnNewUser))
+	}
 	kb := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnStart), tgbotapi.NewKeyboardButton(btnFinish)),
 		tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnChart), tgbotapi.NewKeyboardButton(btnList)),
-		tgbotapi.NewKeyboardButtonRow(tgbotapi.NewKeyboardButton(btnPills)),
+		last,
 	)
 	kb.ResizeKeyboard = true
 	msg.ReplyMarkup = kb

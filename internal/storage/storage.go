@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
+	"github.com/zavgorodniyvv/presureBot/internal/access"
 	"github.com/zavgorodniyvv/presureBot/internal/pills"
 	"github.com/zavgorodniyvv/presureBot/internal/pressure"
 )
@@ -29,6 +30,8 @@ type Storage interface {
 	SetFinalSent(ctx context.Context, userID int64, date string) error
 	// PillDays — дни в диапазоне дат [from, to] включительно.
 	PillDays(ctx context.Context, userID int64, from, to string) ([]pills.Day, error)
+	// HasPillDays — есть ли у пользователя хоть один день с напоминанием или отметкой.
+	HasPillDays(ctx context.Context, userID int64) (bool, error)
 	// PillSchedule — расписание пользователя; ok=false, если он его не задавал.
 	PillSchedule(ctx context.Context, userID int64) (schedule string, ok bool, err error)
 	SetPillSchedule(ctx context.Context, userID int64, schedule string) error
@@ -51,6 +54,7 @@ type Mongo struct {
 	coll     *mongo.Collection
 	pillDays *mongo.Collection
 	settings *mongo.Collection
+	allowed  *mongo.Collection
 }
 
 // NewMongo подключается к базe и создаёт индекс, если его ещё нет.
@@ -72,6 +76,7 @@ func NewMongo(ctx context.Context, uri, database string) (*Mongo, error) {
 		coll:     db.Collection("measurements"),
 		pillDays: db.Collection("pill_days"),
 		settings: db.Collection("settings"),
+		allowed:  db.Collection("allowed_users"),
 	}
 	_, err = s.coll.Indexes().CreateOne(pingCtx, mongo.IndexModel{
 		Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "measured_at", Value: 1}},
@@ -239,6 +244,11 @@ func (s *Mongo) PillDays(ctx context.Context, userID int64, from, to string) ([]
 	return out, nil
 }
 
+func (s *Mongo) HasPillDays(ctx context.Context, userID int64) (bool, error) {
+	n, err := s.pillDays.CountDocuments(ctx, bson.D{{Key: "user_id", Value: userID}}, options.Count().SetLimit(1))
+	return n > 0, err
+}
+
 func (s *Mongo) PillSchedule(ctx context.Context, userID int64) (string, bool, error) {
 	var d struct {
 		PillSchedule *string `bson:"pill_schedule"`
@@ -257,5 +267,53 @@ func (s *Mongo) SetPillSchedule(ctx context.Context, userID int64, schedule stri
 	_, err := s.settings.UpdateOne(ctx, bson.D{{Key: "_id", Value: userID}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "pill_schedule", Value: schedule}}}},
 		options.UpdateOne().SetUpsert(true))
+	return err
+}
+
+// accessDoc — документ в коллекции allowed_users.
+type accessDoc struct {
+	ID      int64     `bson:"_id"`
+	Name    string    `bson:"name,omitempty"`
+	AddedAt time.Time `bson:"added_at"`
+	AddedBy int64     `bson:"added_by,omitempty"`
+}
+
+func (s *Mongo) AllowedUsers(ctx context.Context) ([]access.User, error) {
+	cur, err := s.allowed.Find(ctx, bson.D{})
+	if err != nil {
+		return nil, err
+	}
+	var docs []accessDoc
+	if err := cur.All(ctx, &docs); err != nil {
+		return nil, err
+	}
+	out := make([]access.User, len(docs))
+	for i, d := range docs {
+		out[i] = access.User{ID: d.ID, Name: d.Name, AddedAt: d.AddedAt, AddedBy: d.AddedBy}
+	}
+	return out, nil
+}
+
+func (s *Mongo) AddAllowedUser(ctx context.Context, u access.User) (bool, error) {
+	res, err := s.allowed.UpdateOne(ctx, bson.D{{Key: "_id", Value: u.ID}},
+		bson.D{{Key: "$setOnInsert", Value: accessDoc{ID: u.ID, Name: u.Name, AddedAt: u.AddedAt, AddedBy: u.AddedBy}}},
+		options.UpdateOne().SetUpsert(true))
+	if err != nil {
+		return false, err
+	}
+	return res.UpsertedCount > 0, nil
+}
+
+func (s *Mongo) RemoveAllowedUser(ctx context.Context, id int64) (bool, error) {
+	res, err := s.allowed.DeleteOne(ctx, bson.D{{Key: "_id", Value: id}})
+	if err != nil {
+		return false, err
+	}
+	return res.DeletedCount > 0, nil
+}
+
+func (s *Mongo) SetAllowedUserName(ctx context.Context, id int64, name string) error {
+	_, err := s.allowed.UpdateOne(ctx, bson.D{{Key: "_id", Value: id}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "name", Value: name}}}})
 	return err
 }

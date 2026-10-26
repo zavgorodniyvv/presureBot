@@ -13,6 +13,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/zavgorodniyvv/presureBot/internal/access"
 	"github.com/zavgorodniyvv/presureBot/internal/bot"
 	"github.com/zavgorodniyvv/presureBot/internal/logging"
 	"github.com/zavgorodniyvv/presureBot/internal/pills"
@@ -36,13 +37,15 @@ func main() {
 		}
 	}
 
-	allowed, err := parseIDs(os.Getenv("ALLOWED_USER_IDS"))
+	seed, err := parseIDs(os.Getenv("ALLOWED_USER_IDS"))
 	if err != nil {
 		log.Fatalf("ALLOWED_USER_IDS: укажите Telegram ID через запятую: %v", err)
 	}
-	if len(allowed) == 0 {
-		// Запускаемся без доступа для всех: так бот может сообщить пользователю его ID.
-		log.Print("ВНИМАНИЕ: ALLOWED_USER_IDS пуст — бот никого не обслуживает, только сообщает Telegram ID")
+	var admin int64
+	if v := os.Getenv("ADMIN_USER_ID"); v != "" {
+		if admin, err = strconv.ParseInt(strings.TrimSpace(v), 10, 64); err != nil || admin <= 0 {
+			log.Fatalf("ADMIN_USER_ID: нужен Telegram ID числом (%v)", err)
+		}
 	}
 
 	loc, err := time.LoadLocation(env("TZ", "Asia/Jerusalem"))
@@ -80,6 +83,18 @@ func main() {
 	}
 	defer st.Close()
 
+	acl, err := access.Load(ctx, st, admin, seed)
+	if err != nil {
+		log.Fatalf("список пользователей: %v", err)
+	}
+	if admin == 0 {
+		log.Print("ВНИМАНИЕ: ADMIN_USER_ID не задан — добавлять пользователей можно только через ALLOWED_USER_IDS")
+		if len(acl.IDs()) == 0 {
+			// Запускаемся без доступа для всех: так бот может сообщить пользователю его ID.
+			log.Print("ВНИМАНИЕ: список пользователей пуст — бот никого не обслуживает, только сообщает Telegram ID")
+		}
+	}
+
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		log.Fatal(err)
@@ -87,7 +102,7 @@ func main() {
 	log.Printf("запущен как @%s", api.Self.UserName)
 
 	b := bot.New(api, recognize.NewOpenAI(openAIKey, env("OPENAI_MODEL", "gpt-4.1")), st, bot.Config{
-		AllowedUsers:   allowed,
+		Access:         acl,
 		Location:       loc,
 		TrendHalfLife:  halfLife,
 		SessionTimeout: sessionTimeout,
@@ -95,6 +110,10 @@ func main() {
 		PillCutoff:     pillCutoff,
 		PillRepeat:     pillRepeat,
 	})
+	b.SetupCommands()
+	if err := b.SeedPillSchedules(ctx); err != nil {
+		log.Fatalf("расписание таблеток: %v", err)
+	}
 	go b.RunReminders(ctx)
 
 	upd := tgbotapi.NewUpdate(0)
@@ -121,8 +140,8 @@ func env(name, def string) string {
 	return def
 }
 
-func parseIDs(s string) (map[int64]bool, error) {
-	ids := make(map[int64]bool)
+func parseIDs(s string) ([]int64, error) {
+	var ids []int64
 	for _, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -132,7 +151,7 @@ func parseIDs(s string) (map[int64]bool, error) {
 		if err != nil {
 			return nil, err
 		}
-		ids[id] = true
+		ids = append(ids, id)
 	}
 	return ids, nil
 }

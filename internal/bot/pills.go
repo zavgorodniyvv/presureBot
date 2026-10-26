@@ -39,21 +39,52 @@ func (b *Bot) RunReminders(ctx context.Context) {
 
 func (b *Bot) pillTick(ctx context.Context) {
 	now := b.now()
-	for userID := range b.cfg.AllowedUsers {
+	for _, userID := range b.cfg.Access.IDs() {
 		if err := b.remindUser(ctx, userID, now); err != nil {
 			log.Printf("напоминание о таблетках для %d: %v", userID, err)
 		}
 	}
 }
 
-// pillSchedule — расписание пользователя из базы или общее по умолчанию.
+// SeedPillSchedules записывает расписание тем, у кого его ещё нет в базе.
+// Раньше такие пользователи получали общее PILL_SCHEDULE; теперь без своего
+// расписания напоминаний нет. Кому уже напоминали (или кто отмечал таблетки),
+// получает PILL_SCHEDULE, остальным явно записывается «выключено» — иначе
+// новый пользователь, нажавший «Выпил таблетки», получил бы его при следующем старте.
+func (b *Bot) SeedPillSchedules(ctx context.Context) error {
+	for _, userID := range b.cfg.Access.IDs() {
+		_, ok, err := b.store.PillSchedule(ctx, userID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		has, err := b.store.HasPillDays(ctx, userID)
+		if err != nil {
+			return err
+		}
+		var sch pills.Schedule
+		if has {
+			sch = b.cfg.PillSchedule
+		}
+		if err := b.store.SetPillSchedule(ctx, userID, sch.String()); err != nil {
+			return err
+		}
+		if len(sch) == 0 {
+			log.Printf("таблетки для %d: напоминания выключены", userID)
+		} else {
+			log.Printf("таблетки для %d: перенесено расписание %s", userID, sch)
+		}
+	}
+	return nil
+}
+
+// pillSchedule — расписание пользователя из базы; не задано — напоминаний нет.
 func (b *Bot) pillSchedule(ctx context.Context, userID int64) (pills.Schedule, error) {
 	s, ok, err := b.store.PillSchedule(ctx, userID)
-	if err != nil {
+	if err != nil || !ok {
 		return nil, err
-	}
-	if !ok {
-		return b.cfg.PillSchedule, nil
 	}
 	return pills.ParseSchedule(s)
 }
