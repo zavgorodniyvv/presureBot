@@ -95,6 +95,9 @@ func main() {
 		PillCutoff:     pillCutoff,
 		PillRepeat:     pillRepeat,
 	})
+	if err := b.SeedPillSchedules(ctx); err != nil {
+		log.Fatalf("расписание таблеток: %v", err)
+	}
 	go b.RunReminders(ctx)
 
 	upd := tgbotapi.NewUpdate(0)

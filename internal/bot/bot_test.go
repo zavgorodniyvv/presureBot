@@ -156,6 +156,12 @@ func (s *fakeStore) PillDays(_ context.Context, _ int64, from, to string) ([]pil
 	return out, nil
 }
 
+func (s *fakeStore) HasPillDays(_ context.Context, _ int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pillDays) > 0, nil
+}
+
 func (s *fakeStore) PillSchedule(_ context.Context, uid int64) (string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

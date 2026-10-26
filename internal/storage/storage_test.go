@@ -95,6 +95,10 @@ func TestMongoPills(t *testing.T) {
 	st.pillDays.DeleteMany(ctx, bson.D{{Key: "user_id", Value: user}})
 	st.settings.DeleteMany(ctx, bson.D{{Key: "_id", Value: user}})
 
+	if has, err := st.HasPillDays(ctx, user); err != nil || has {
+		t.Fatalf("история до записи: %v %v", has, err)
+	}
+
 	d, err := st.PillDay(ctx, user, "2026-10-06")
 	if err != nil || d.Taken() || d.Date != "2026-10-06" {
 		t.Fatalf("пустой день: %+v %v", d, err)
@@ -119,6 +123,10 @@ func TestMongoPills(t *testing.T) {
 	}
 	if err := st.SetFinalSent(ctx, user, "2026-10-08"); err != nil {
 		t.Fatal(err)
+	}
+
+	if has, err := st.HasPillDays(ctx, user); err != nil || !has {
+		t.Fatalf("история после записи: %v %v", has, err)
 	}
 
 	days, err := st.PillDays(ctx, user, "2026-10-06", "2026-10-08")

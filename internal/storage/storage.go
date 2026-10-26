@@ -29,6 +29,8 @@ type Storage interface {
 	SetFinalSent(ctx context.Context, userID int64, date string) error
 	// PillDays — дни в диапазоне дат [from, to] включительно.
 	PillDays(ctx context.Context, userID int64, from, to string) ([]pills.Day, error)
+	// HasPillDays — есть ли у пользователя хоть один день с напоминанием или отметкой.
+	HasPillDays(ctx context.Context, userID int64) (bool, error)
 	// PillSchedule — расписание пользователя; ok=false, если он его не задавал.
 	PillSchedule(ctx context.Context, userID int64) (schedule string, ok bool, err error)
 	SetPillSchedule(ctx context.Context, userID int64, schedule string) error
@@ -237,6 +239,11 @@ func (s *Mongo) PillDays(ctx context.Context, userID int64, from, to string) ([]
 		out[i] = d.day()
 	}
 	return out, nil
+}
+
+func (s *Mongo) HasPillDays(ctx context.Context, userID int64) (bool, error) {
+	n, err := s.pillDays.CountDocuments(ctx, bson.D{{Key: "user_id", Value: userID}}, options.Count().SetLimit(1))
+	return n > 0, err
 }
 
 func (s *Mongo) PillSchedule(ctx context.Context, userID int64) (string, bool, error) {
