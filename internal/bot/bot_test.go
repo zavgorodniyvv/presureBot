@@ -12,15 +12,25 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/zavgorodniyvv/presureBot/internal/access"
 	"github.com/zavgorodniyvv/presureBot/internal/pills"
 	"github.com/zavgorodniyvv/presureBot/internal/pressure"
 	"github.com/zavgorodniyvv/presureBot/internal/recognize"
 )
 
 const (
-	userID = int64(100)
-	chatID = int64(100)
+	userID  = int64(100)
+	chatID  = int64(100)
+	adminID = int64(1)
 )
+
+func testAccess() *access.List {
+	l, err := access.Load(context.Background(), &access.MemoryStore{}, adminID, []int64{userID})
+	if err != nil {
+		panic(err)
+	}
+	return l
+}
 
 type fakeAPI struct {
 	mu      sync.Mutex
@@ -222,7 +232,7 @@ func newTestBot(timeout time.Duration) (*Bot, *fakeAPI, *fakeStore) {
 	st := &fakeStore{}
 	loc, _ := time.LoadLocation("Asia/Jerusalem")
 	b := New(api, fakeRecognizer{}, st, Config{
-		AllowedUsers:   map[int64]bool{userID: true},
+		Access:         testAccess(),
 		Location:       loc,
 		TrendHalfLife:  3 * 24 * time.Hour,
 		SessionTimeout: timeout,
@@ -382,7 +392,7 @@ func TestForeignUserIgnored(t *testing.T) {
 	if len(st.saved) != 0 {
 		t.Fatal("чужой пользователь смог записать")
 	}
-	if got := api.lastText(t); !strings.Contains(got, "личный бот") {
+	if got := api.textsTo(chatID); len(got) != 1 || !strings.Contains(got[0], "личный бот") {
 		t.Errorf("ответ: %q", got)
 	}
 }

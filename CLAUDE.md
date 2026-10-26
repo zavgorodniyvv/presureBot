@@ -11,6 +11,8 @@ presureBot — Telegram-бот для учёта артериального да
 - `internal/pressure/` — `Reading`/`Measurement`, проверка диапазонов, `Average` (1–2 замера — среднее, ≥3 — первый отбрасывается), `Trend` (экспоненциально взвешенное по времени среднее, `TREND_HALF_LIFE`)
 - `internal/pills/` — расписание таблеток по дням недели (`ParseSchedule`, «вс,вт,чт 04:30; пн,ср 06:30»), окно напоминаний на день
 - `internal/bot/pills.go` — напоминания: тик каждые 30 с, повтор каждые `PILL_REPEAT` до `PILL_CUTOFF`, потом одно финальное; состояние дня в Mongo `pill_days` (переживает рестарт); расписание — в `settings`, без него напоминаний нет; `/pills` — расписание и пропуски
+- `internal/access/` — список разрешённых пользователей и админ, без зависимости от Telegram и базы (переносится в другие боты); Mongo-реализация `Store` — в `internal/storage` (коллекция `allowed_users`, `_id` — Telegram ID)
+- `internal/bot/admin.go` — запрос доступа от незнакомца (админу кнопки «Разрешить/Отклонить», не чаще раза в сутки), `/newuser` (ID числом или пересланное сообщение), `/users`, `/deluser`; меню команд админа — через `setMyCommands` со scope его чата
 - `internal/recognize/` — клиент OpenAI Chat Completions (без SDK)
 - `internal/storage/` — mongo-driver v2, индекс `(user_id, measured_at)` создаётся при старте
 - `internal/chart/` — gonum/plot: красное верхнее, синее нижнее, пунктир — тренд, серые вертикали — границы суток (на периодах > 92 дней — границы месяцев)
@@ -35,7 +37,7 @@ TEST_MONGODB_URI='mongodb://localhost:57017' go test ./internal/storage
 
 ## Переменные окружения
 
-Обязательные: `TELEGRAM_TOKEN`, `MONGODB_URI`, `OPENAI_API_KEY`. `ALLOWED_USER_IDS` (через запятую) — пока пуст, бот только сообщает отправителю его ID.
+Обязательные: `TELEGRAM_TOKEN`, `MONGODB_URI`, `OPENAI_API_KEY`. `ADMIN_USER_ID` — администратор (доступ всегда, `/newuser`, `/users`, `/deluser`, запросы доступа с кнопкой). `ALLOWED_USER_IDS` (через запятую) — при старте добавляются в `allowed_users`, если их там нет; основной список — в базе.
 Необязательные: `PILL_SCHEDULE` (при старте переносится в базу тем, у кого расписания нет, но есть история `pill_days`; остальным пишется «выключено» — у новых пользователей напоминаний нет), `PILL_CUTOFF` (12:00), `PILL_REPEAT` (10m), `MONGODB_DATABASE` (pressurebot), `OPENAI_MODEL` (gpt-4.1), `TZ` (Asia/Jerusalem), `TREND_HALF_LIFE` (72h), `SESSION_TIMEOUT` (20m).
 
 ## Соглашения

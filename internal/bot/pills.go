@@ -39,7 +39,7 @@ func (b *Bot) RunReminders(ctx context.Context) {
 
 func (b *Bot) pillTick(ctx context.Context) {
 	now := b.now()
-	for userID := range b.cfg.AllowedUsers {
+	for _, userID := range b.cfg.Access.IDs() {
 		if err := b.remindUser(ctx, userID, now); err != nil {
 			log.Printf("напоминание о таблетках для %d: %v", userID, err)
 		}
@@ -52,7 +52,7 @@ func (b *Bot) pillTick(ctx context.Context) {
 // получает PILL_SCHEDULE, остальным явно записывается «выключено» — иначе
 // новый пользователь, нажавший «Выпил таблетки», получил бы его при следующем старте.
 func (b *Bot) SeedPillSchedules(ctx context.Context) error {
-	for userID := range b.cfg.AllowedUsers {
+	for _, userID := range b.cfg.Access.IDs() {
 		_, ok, err := b.store.PillSchedule(ctx, userID)
 		if err != nil {
 			return err

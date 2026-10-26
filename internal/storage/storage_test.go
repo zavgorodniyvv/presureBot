@@ -8,6 +8,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"github.com/zavgorodniyvv/presureBot/internal/access"
 	"github.com/zavgorodniyvv/presureBot/internal/pressure"
 )
 
@@ -142,5 +143,48 @@ func TestMongoPills(t *testing.T) {
 	}
 	if s, ok, err := st.PillSchedule(ctx, user); err != nil || !ok || s != "пн 07:00" {
 		t.Fatalf("расписание: %q ok=%v err=%v", s, ok, err)
+	}
+}
+
+func TestMongoAccess(t *testing.T) {
+	uri := os.Getenv("TEST_MONGODB_URI")
+	if uri == "" {
+		t.Skip("TEST_MONGODB_URI не задан")
+	}
+	ctx := context.Background()
+	st, err := NewMongo(ctx, uri, "pressurebot_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.allowed.DeleteMany(ctx, bson.D{})
+
+	t0 := time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)
+	if added, err := st.AddAllowedUser(ctx, access.User{ID: 7, Name: "Аня", AddedAt: t0, AddedBy: 1}); err != nil || !added {
+		t.Fatalf("добавление: %v %v", added, err)
+	}
+	if added, err := st.AddAllowedUser(ctx, access.User{ID: 7, Name: "Другая", AddedAt: t0.Add(time.Hour)}); err != nil || added {
+		t.Fatalf("повторное добавление: %v %v", added, err)
+	}
+	if _, err := st.AddAllowedUser(ctx, access.User{ID: 8, AddedAt: t0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetAllowedUserName(ctx, 8, "Борис"); err != nil {
+		t.Fatal(err)
+	}
+	us, err := st.AllowedUsers(ctx)
+	if err != nil || len(us) != 2 {
+		t.Fatalf("список: %+v %v", us, err)
+	}
+	for _, u := range us {
+		if u.ID == 7 && (u.Name != "Аня" || u.AddedBy != 1 || !u.AddedAt.Equal(t0)) || u.ID == 8 && u.Name != "Борис" {
+			t.Errorf("пользователь: %+v", u)
+		}
+	}
+	if removed, err := st.RemoveAllowedUser(ctx, 7); err != nil || !removed {
+		t.Fatalf("удаление: %v %v", removed, err)
+	}
+	if removed, _ := st.RemoveAllowedUser(ctx, 7); removed {
+		t.Error("повторное удаление")
 	}
 }
