@@ -32,6 +32,7 @@ const (
 
 	cbDropReading = "drop:"  // удалить замер из текущей серии
 	cbDeleteSaved = "del:"   // удалить сохранённое измерение из базы
+	cbRestore     = "undo:"  // вернуть удалённое измерение
 	cbChart       = "chart:" // показать график за N дней
 	cbList        = "list:"  // показать список измерений за N дней
 )
@@ -356,9 +357,7 @@ func (b *Bot) finishSession(chatID int64, auto bool) {
 		sb.WriteString("Один замер.")
 	}
 
-	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🗑 Удалить запись", cbDeleteSaved+id),
-	)}
+	rows := [][]tgbotapi.InlineKeyboardButton{deleteRow(id)}
 	// Утренний замер — хороший момент вспомнить о таблетках.
 	if date, ok := b.pillPrompt(ctx, s.userID); ok {
 		sb.WriteString("\n\n" + pillQuestion)
@@ -400,9 +399,29 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) {
 			answer = "Ошибка базы, попробуйте позже"
 		case ok:
 			answer = "Запись удалена"
-			b.editText(q.Message, "<s>"+escape(q.Message.Text)+"</s>\nЗапись удалена.")
+			// Вопрос о таблетках без кнопки «Выпил» уже ни к чему.
+			text, _, _ := strings.Cut(q.Message.Text, pillQuestion)
+			b.editText(q.Message, "<s>"+escape(strings.TrimSpace(text))+"</s>"+deletedNote, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("↩️ Вернуть запись", cbRestore+id),
+			))
 		default:
 			answer = "Запись уже удалена"
+		}
+
+	case strings.HasPrefix(q.Data, cbRestore):
+		id := strings.TrimPrefix(q.Data, cbRestore)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ok, err := b.store.Restore(ctx, q.From.ID, id)
+		cancel()
+		switch {
+		case err != nil:
+			log.Printf("возврат измерения %s: %v", id, err)
+			answer = "Ошибка базы, попробуйте позже"
+		case ok:
+			answer = "Запись возвращена"
+			b.editText(q.Message, escape(strings.TrimSuffix(q.Message.Text, deletedNote)), deleteRow(id))
+		default:
+			answer = "Запись уже на месте"
 		}
 
 	case strings.HasPrefix(q.Data, cbPill), strings.HasPrefix(q.Data, cbPillAfter):
@@ -577,10 +596,22 @@ func (b *Bot) replyTo(chatID int64, msgID int, text string) {
 	b.send(msg)
 }
 
-func (b *Bot) editText(m *tgbotapi.Message, html string) {
+// editText меняет текст сообщения; без rows кнопки под ним пропадают.
+func (b *Bot) editText(m *tgbotapi.Message, html string, rows ...[]tgbotapi.InlineKeyboardButton) {
 	edit := tgbotapi.NewEditMessageText(m.Chat.ID, m.MessageID, html)
 	edit.ParseMode = tgbotapi.ModeHTML
+	if len(rows) > 0 {
+		kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+		edit.ReplyMarkup = &kb
+	}
 	b.send(edit)
+}
+
+// deletedNote — приписка к зачёркнутому итогу; при возврате записи убирается.
+const deletedNote = "\nЗапись удалена."
+
+func deleteRow(id string) []tgbotapi.InlineKeyboardButton {
+	return tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🗑 Удалить запись", cbDeleteSaved+id))
 }
 
 func (b *Bot) send(c tgbotapi.Chattable) {
