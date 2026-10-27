@@ -103,6 +103,7 @@ func atoi(s string) int {
 type fakeStore struct {
 	mu        sync.Mutex
 	saved     []pressure.Measurement
+	deleted   []pressure.Measurement
 	seq       int
 	fail      bool
 	pillDays  map[string]pills.Day // ключ — дата; тесты работают с одним пользователем
@@ -207,6 +208,20 @@ func (s *fakeStore) Delete(_ context.Context, uid int64, id string) (bool, error
 	for i, m := range s.saved {
 		if m.ID == id && m.UserID == uid {
 			s.saved = append(s.saved[:i], s.saved[i+1:]...)
+			s.deleted = append(s.deleted, m)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *fakeStore) Restore(_ context.Context, uid int64, id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, m := range s.deleted {
+		if m.ID == id && m.UserID == uid {
+			s.deleted = append(s.deleted[:i], s.deleted[i+1:]...)
+			s.saved = append(s.saved, m)
 			return true, nil
 		}
 	}
@@ -347,6 +362,57 @@ func TestDropReading(t *testing.T) {
 
 	if len(st.saved) != 1 || st.saved[0].Systolic != 124 || st.saved[0].ReadingsCount != 1 {
 		t.Fatalf("saved = %+v", st.saved)
+	}
+}
+
+func TestDeleteAndRestore(t *testing.T) {
+	b, api, st := newTestBot(0)
+
+	b.Handle(photo("120/80/60", 0))
+	b.Handle(text(btnFinish, 1))
+	summary := api.lastText(t)
+	cb := func(data, msgText string) {
+		b.Handle(tgbotapi.Update{CallbackQuery: &tgbotapi.CallbackQuery{
+			ID: "q", From: &tgbotapi.User{ID: userID},
+			Message: &tgbotapi.Message{MessageID: 5, Chat: &tgbotapi.Chat{ID: chatID}, Text: msgText},
+			Data:    data,
+		}})
+	}
+	lastEdit := func() tgbotapi.EditMessageTextConfig {
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		for i := len(api.sent) - 1; i >= 0; i-- {
+			if e, ok := api.sent[i].(tgbotapi.EditMessageTextConfig); ok {
+				return e
+			}
+		}
+		t.Fatal("сообщение не редактировали")
+		return tgbotapi.EditMessageTextConfig{}
+	}
+
+	cb(cbDeleteSaved+"id1", summary)
+	if len(st.saved) != 0 {
+		t.Fatalf("запись не удалена: %+v", st.saved)
+	}
+	e := lastEdit()
+	if !strings.HasPrefix(e.Text, "<s>Записано: 120/80") || !strings.HasSuffix(e.Text, deletedNote) {
+		t.Errorf("после удаления: %q", e.Text)
+	}
+	if e.ReplyMarkup == nil || e.ReplyMarkup.InlineKeyboard[0][0].CallbackData == nil || *e.ReplyMarkup.InlineKeyboard[0][0].CallbackData != cbRestore+"id1" {
+		t.Fatalf("нет кнопки возврата: %+v", e.ReplyMarkup)
+	}
+
+	// Telegram присылает текст без разметки зачёркивания.
+	cb(cbRestore+"id1", summary+deletedNote)
+	if len(st.saved) != 1 || st.saved[0].Systolic != 120 {
+		t.Fatalf("запись не вернулась: %+v", st.saved)
+	}
+	e = lastEdit()
+	if e.Text != escape(summary) {
+		t.Errorf("после возврата: %q, ожидали %q", e.Text, summary)
+	}
+	if e.ReplyMarkup == nil || *e.ReplyMarkup.InlineKeyboard[0][0].CallbackData != cbDeleteSaved+"id1" {
+		t.Errorf("нет кнопки удаления: %+v", e.ReplyMarkup)
 	}
 }
 

@@ -74,9 +74,26 @@ func TestMongo(t *testing.T) {
 	if ok, err := st.Delete(ctx, user, id1); err != nil || !ok {
 		t.Errorf("удаление: ok=%v err=%v", ok, err)
 	}
+	if ok, err := st.Delete(ctx, user, id1); err != nil || ok {
+		t.Errorf("повторное удаление: ok=%v err=%v", ok, err)
+	}
 	got, _ = st.List(ctx, user, t0.Add(-24*time.Hour), t0.Add(time.Hour))
 	if len(got) != 1 {
 		t.Errorf("после удаления осталось %d", len(got))
+	}
+
+	if ok, err := st.Restore(ctx, user+1, id1); err != nil || ok {
+		t.Errorf("чужую запись возвращать нельзя: ok=%v err=%v", ok, err)
+	}
+	if ok, err := st.Restore(ctx, user, id1); err != nil || !ok {
+		t.Errorf("возврат: ok=%v err=%v", ok, err)
+	}
+	if ok, err := st.Restore(ctx, user, id1); err != nil || ok {
+		t.Errorf("повторный возврат: ok=%v err=%v", ok, err)
+	}
+	got, _ = st.List(ctx, user, t0.Add(-24*time.Hour), t0.Add(time.Hour))
+	if len(got) != 2 || got[1].ID != id1 || got[1].Systolic != 130 {
+		t.Errorf("после возврата: %+v", got)
 	}
 }
 

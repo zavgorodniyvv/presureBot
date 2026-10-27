@@ -19,7 +19,9 @@ import (
 // Storage — то, что нужно боту от хранилища.
 type Storage interface {
 	Save(ctx context.Context, m pressure.Measurement) (string, error)
+	// Delete помечает измерение удалённым; Restore возвращает его обратно.
 	Delete(ctx context.Context, userID int64, id string) (bool, error)
+	Restore(ctx context.Context, userID int64, id string) (bool, error)
 	List(ctx context.Context, userID int64, from, to time.Time) ([]pressure.Measurement, error)
 
 	// Таблетки: состояние дня (date — pills.DateLayout по местному времени).
@@ -47,6 +49,7 @@ type doc struct {
 	Pulse         int           `bson:"pulse,omitempty"` // нет поля — пульс не распознан
 	ReadingsCount int           `bson:"readings_count"`
 	CreatedAt     time.Time     `bson:"created_at"`
+	DeletedAt     time.Time     `bson:"deleted_at,omitempty"` // нет поля — запись не удалена
 }
 
 type Mongo struct {
@@ -117,22 +120,42 @@ func (s *Mongo) Save(ctx context.Context, m pressure.Measurement) (string, error
 }
 
 func (s *Mongo) Delete(ctx context.Context, userID int64, id string) (bool, error) {
+	return s.setDeleted(ctx, userID, id, true)
+}
+
+func (s *Mongo) Restore(ctx context.Context, userID int64, id string) (bool, error) {
+	return s.setDeleted(ctx, userID, id, false)
+}
+
+// setDeleted ставит или снимает отметку deleted_at. Запись из базы не стирается,
+// чтобы её можно было вернуть кнопкой. ok=false — записи нет или она уже в нужном состоянии.
+func (s *Mongo) setDeleted(ctx context.Context, userID int64, id string, deleted bool) (bool, error) {
 	oid, err := bson.ObjectIDFromHex(id)
 	if err != nil {
 		return false, nil // такой записи точно нет
 	}
-	res, err := s.coll.DeleteOne(ctx, bson.D{{Key: "_id", Value: oid}, {Key: "user_id", Value: userID}})
+	filter := bson.D{
+		{Key: "_id", Value: oid},
+		{Key: "user_id", Value: userID},
+		{Key: "deleted_at", Value: bson.D{{Key: "$exists", Value: !deleted}}},
+	}
+	update := bson.D{{Key: "$unset", Value: bson.D{{Key: "deleted_at", Value: ""}}}}
+	if deleted {
+		update = bson.D{{Key: "$set", Value: bson.D{{Key: "deleted_at", Value: time.Now()}}}}
+	}
+	res, err := s.coll.UpdateOne(ctx, filter, update)
 	if err != nil {
 		return false, err
 	}
-	return res.DeletedCount > 0, nil
+	return res.ModifiedCount > 0, nil
 }
 
-// List возвращает измерения пользователя в полуинтервале [from, to), по времени.
+// List возвращает измерения пользователя в полуинтервале [from, to), по времени, без удалённых.
 func (s *Mongo) List(ctx context.Context, userID int64, from, to time.Time) ([]pressure.Measurement, error) {
 	filter := bson.D{
 		{Key: "user_id", Value: userID},
 		{Key: "measured_at", Value: bson.D{{Key: "$gte", Value: from}, {Key: "$lt", Value: to}}},
+		{Key: "deleted_at", Value: bson.D{{Key: "$exists", Value: false}}},
 	}
 	cur, err := s.coll.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "measured_at", Value: 1}}))
 	if err != nil {
