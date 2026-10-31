@@ -26,7 +26,7 @@ var (
 	redTrend  = color.NRGBA{R: 0xd6, G: 0x27, B: 0x28, A: 0x99}
 	blueTrend = color.NRGBA{R: 0x1f, G: 0x5f, B: 0xd0, A: 0x99}
 	dayLine   = color.Gray{Y: 0xb0}
-	missedDay = color.NRGBA{R: 0xff, G: 0xc1, B: 0x07, A: 0x38} // бледно-янтарный: не спорит с красной линией
+	missedDay = color.NRGBA{R: 0x60, G: 0x60, B: 0x60, A: 0x30} // полупрозрачный серый поверх зон
 	gridLine  = color.Gray{Y: 0xe6}
 )
 
@@ -37,6 +37,29 @@ type Options struct {
 	Title    string
 	// MissedPills — начала суток, когда таблетки не отмечены; закрашиваются фоном.
 	MissedPills []time.Time
+}
+
+// Зоны давления на фоне (AHA/ACC 2025): норма <120/80, повышенное
+// 120–139/80–89 (повышенное и I степень AHA объединены), высокое ≥140/90.
+// Верхнее и нижнее на одной оси, а пороги у них разные, поэтому ниже
+// zoneSplit рисуются зоны нижнего давления, выше — верхнего.
+var (
+	zoneNormal   = color.RGBA{R: 0xe3, G: 0xf4, B: 0xe0, A: 0xff}
+	zoneElevated = color.RGBA{R: 0xfd, G: 0xf6, B: 0xd3, A: 0xff}
+	zoneHigh     = color.RGBA{R: 0xfb, G: 0xe2, B: 0xe0, A: 0xff}
+
+	zones = []zone{
+		{math.Inf(-1), 80, zoneNormal}, {80, 90, zoneElevated}, {90, zoneSplit, zoneHigh}, // нижнее
+		{zoneSplit, 120, zoneNormal}, {120, 140, zoneElevated}, {140, math.Inf(1), zoneHigh}, // верхнее
+	}
+)
+
+const zoneSplit = 100
+
+// zone — горизонтальная полоса фона [From, To).
+type zone struct {
+	From, To float64
+	Color    color.Color
 }
 
 // Render рисует график.
@@ -86,17 +109,28 @@ func Render(measurements []pressure.Measurement, trend []pressure.TrendPoint, op
 	yMin = math.Floor((yMin-5)/10) * 10
 	yMax = math.Ceil((yMax+5)/10) * 10
 	p.Y.Min, p.Y.Max = yMin, yMax
-	p.X.Min, p.X.Max = float64(opt.From.Unix()), float64(opt.To.Unix())
+	x0, x1 := float64(opt.From.Unix()), float64(opt.To.Unix())
+	p.X.Min, p.X.Max = x0, x1
 
-	// Дни без таблеток — фоновые полосы под всеми линиями.
-	for i, d := range opt.MissedPills {
-		x0, x1 := float64(d.Unix()), float64(d.AddDate(0, 0, 1).Unix())
-		poly, err := plotter.NewPolygon(plotter.XYs{{X: x0, Y: yMin}, {X: x1, Y: yMin}, {X: x1, Y: yMax}, {X: x0, Y: yMax}})
+	// Зоны давления — самый нижний слой.
+	for _, z := range zones {
+		lo, hi := math.Max(z.From, yMin), math.Min(z.To, yMax)
+		if lo >= hi {
+			continue
+		}
+		poly, err := rect(x0, x1, lo, hi, z.Color)
 		if err != nil {
 			return nil, err
 		}
-		poly.Color = missedDay
-		poly.LineStyle.Width = 0
+		p.Add(poly)
+	}
+
+	// Дни без таблеток — полупрозрачные полосы поверх зон, под линиями.
+	for i, d := range opt.MissedPills {
+		poly, err := rect(float64(d.Unix()), float64(d.AddDate(0, 0, 1).Unix()), yMin, yMax, missedDay)
+		if err != nil {
+			return nil, err
+		}
 		p.Add(poly)
 		if i == 0 {
 			p.Legend.Add("пропуск таблеток", poly)
@@ -156,6 +190,17 @@ func Render(measurements []pressure.Measurement, trend []pressure.TrendPoint, op
 		return nil, fmt.Errorf("рендер PNG: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// rect — залитый прямоугольник без контура.
+func rect(x0, x1, y0, y1 float64, c color.Color) (*plotter.Polygon, error) {
+	poly, err := plotter.NewPolygon(plotter.XYs{{X: x0, Y: y0}, {X: x1, Y: y0}, {X: x1, Y: y1}, {X: x0, Y: y1}})
+	if err != nil {
+		return nil, err
+	}
+	poly.Color = c
+	poly.LineStyle.Width = 0
+	return poly, nil
 }
 
 func addSeries(p *plot.Plot, xys plotter.XYs, c color.Color, radius vg.Length, name string) error {
